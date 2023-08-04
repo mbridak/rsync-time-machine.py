@@ -1,5 +1,6 @@
 """Test suite for `rsync-time-machine.py`."""
 import os
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -79,8 +80,8 @@ def test_parse_ssh() -> None:
     ssh = parse_ssh(
         "user@example.com:/path/to/src",
         "user@example.com:/path/to/dest",
-        "22",
-        None,
+        ssh_port="22",
+        id_rsa=None,
         allow_host_only=False,
     )
     assert ssh == SSH(
@@ -96,8 +97,8 @@ def test_parse_ssh() -> None:
     ssh = parse_ssh(
         "user@example.com:/path/to/src",
         "/path/to/dest",
-        "22",
-        None,
+        ssh_port="22",
+        id_rsa=None,
         allow_host_only=False,
     )
     assert ssh == SSH(
@@ -113,8 +114,8 @@ def test_parse_ssh() -> None:
     ssh = parse_ssh(
         "/path/to/src",
         "user@example.com:/path/to/dest",
-        "22",
-        None,
+        ssh_port="22",
+        id_rsa=None,
         allow_host_only=False,
     )
     assert ssh == SSH(
@@ -128,15 +129,21 @@ def test_parse_ssh() -> None:
     )
 
     assert (
-        parse_ssh("/path/to/src", "/path/to/dest", "22", None, allow_host_only=False)
+        parse_ssh(
+            "/path/to/src",
+            "/path/to/dest",
+            ssh_port="22",
+            id_rsa=None,
+            allow_host_only=False,
+        )
         is None
     )
 
     ssh = parse_ssh(
         "host:/path/to/src",
         "host:/path/to/dest",
-        "22",
-        None,
+        ssh_port="22",
+        id_rsa=None,
         allow_host_only=True,
     )
     assert ssh == SSH(
@@ -153,8 +160,8 @@ def test_parse_ssh() -> None:
         parse_ssh(
             "host:/path/to/src",
             "host:/path/to/dest",
-            "22",
-            None,
+            ssh_port="22",
+            id_rsa=None,
             allow_host_only=False,
         )
         is None
@@ -202,6 +209,7 @@ def test_find(tmp_path: Path) -> None:
     path = tmp_path / "testfile.txt"
     path.touch()
     assert find(str(path), None) == str(path)
+    assert find(str(tmp_path), None, maxdepth=0) == str(tmp_path)
 
 
 def test_get_absolute_path(tmp_path: Path) -> None:
@@ -259,9 +267,9 @@ def test_handle_ssh() -> None:
     src_folder, dest_folder, ssh = handle_ssh(
         "user@example.com:/path/to/src",
         "user@example.com:/path/to/dest",
-        "22",
-        None,
-        "exclusion_file",
+        ssh_port="22",
+        id_rsa=None,
+        exclusion_file="exclusion_file",
         allow_host_only=False,
     )
     assert src_folder == "/path/to/src"
@@ -279,9 +287,9 @@ def test_handle_ssh() -> None:
     src_folder, dest_folder, ssh = handle_ssh(
         "/path/to/src",
         "/path/to/dest",
-        "22",
-        "",
-        "exclusion_file",
+        ssh_port="22",
+        id_rsa="",
+        exclusion_file="exclusion_file",
         allow_host_only=False,
     )
     assert src_folder == "/path/to/src"
@@ -442,11 +450,16 @@ def test_backup_with_non_utf8_filename(tmp_path: Path) -> None:
     src_folder.mkdir()
     dest_folder.mkdir()
 
-    # Create a folder and file with a non-UTF8 filename
+    # Create a folder and files with a non-UTF8 filename
     folder = "TEST-UTF8"
     (src_folder / folder).mkdir()
-    non_utf8_filename = "Mîso.rtf"
-    (src_folder / folder / non_utf8_filename).write_text("Hello, World!")
+
+    # Create composed and decomposed form of 'î'
+    composed_filename = unicodedata.normalize("NFC", "Möîso1.rtf")
+    decomposed_filename = unicodedata.normalize("NFD", "Möîso2.rtf")
+
+    (src_folder / folder / composed_filename).write_text("Hello, World!")
+    (src_folder / folder / decomposed_filename).write_text("Hello, World!")
 
     kw = {
         "src_folder": str(src_folder),
@@ -471,7 +484,8 @@ def test_backup_with_non_utf8_filename(tmp_path: Path) -> None:
     backup(**kw)  # type: ignore[arg-type]
 
     # Check that the backup was created
-    assert (dest_folder / "latest" / folder / non_utf8_filename).exists()
-    assert (
-        dest_folder / "latest" / folder / non_utf8_filename
-    ).read_text() == "Hello, World!"
+    for filename in [composed_filename, decomposed_filename]:
+        assert (dest_folder / "latest" / folder / filename).exists()
+        assert (
+            dest_folder / "latest" / folder / filename
+        ).read_text() == "Hello, World!"

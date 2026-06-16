@@ -1,10 +1,13 @@
 """Test suite for `rsync-time-machine.py`."""
+
+from __future__ import annotations
+
 import os
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterator, Union
+from typing import Iterator
 from unittest.mock import Mock, patch
 
 import pytest
@@ -337,12 +340,12 @@ def patch_now_str(
         yield mock_now
 
 
-def assert_n_backups(dest_folder: Union[str, Path], n_expected: int) -> None:
+def assert_n_backups(dest_folder: str | Path, n_expected: int) -> None:
     """Assert the number of backups in the destination folder."""
     assert len(find_backups(str(dest_folder), None)) == n_expected
 
 
-def test_backup(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+def test_backup(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:  # noqa: PLR0915
     """Test the backup function."""
     src_folder = tmp_path / "src"
     dest_folder = tmp_path / "dest"
@@ -364,6 +367,7 @@ def test_backup(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         "rsync_append_flags": "",
         "rsync_get_flags": False,
         "allow_host_only": False,
+        "dry_run": False,
     }
     # Tests backup with no backup.marker file
     with pytest.raises(SystemExit):
@@ -431,13 +435,32 @@ def test_backup(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     (src_folder / "file2.txt").write_text("Hello, World!")
     (src_folder / "file3.txt").write_text("Hello, World!")
     exclusion_file = tmp_path / "exclusion_file.txt"
-    exclusion_file.write_text("file2.txt")
+    exclusion_file.write_text("file2.txt\n")
     with patch_now_str(seconds=0):
         new_kw = dict(kw, exclusion_file=str(tmp_path / "exclusion_file.txt"))
         backup(**new_kw)  # type: ignore[arg-type]
     assert not (dest_folder / "latest" / "file2.txt").exists()
     assert (dest_folder / "latest" / "file3.txt").exists()
     assert_n_backups(dest_folder, 2)
+
+    # Now test dry-run mode:
+    # When dry_run is True, no new backup should be persisted.
+    with patch_now_str(seconds=1):
+        backup(**dict(kw, dry_run=True))  # type: ignore[arg-type]
+    # The number of backups should remain unchanged.
+    assert_n_backups(dest_folder, 2)
+    captured = capsys.readouterr()
+    assert "Dry-run detected" not in captured.out
+    assert "Dry-run mode enabled" in captured.out
+
+    # Dry-run inside `rsync_flags`
+    with patch_now_str(seconds=2):
+        backup(**dict(kw, rsync_append_flags="-n"))  # type: ignore[arg-type]
+    # The number of backups should remain unchanged.
+    assert_n_backups(dest_folder, 2)
+    captured = capsys.readouterr()
+    assert "Dry-run detected" in captured.out
+    assert "Dry-run mode enabled" in captured.out
 
 
 def test_backup_with_non_utf8_filename(tmp_path: Path) -> None:
@@ -475,6 +498,7 @@ def test_backup_with_non_utf8_filename(tmp_path: Path) -> None:
         "rsync_append_flags": "",
         "rsync_get_flags": False,
         "allow_host_only": False,
+        "dry_run": False,
     }
 
     # Create a backup.marker file

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """rsync-time-machine.py: A script for creating and managing time-stamped backups using rsync."""
+
+from __future__ import annotations
+
 import argparse
 import asyncio
 import os
@@ -8,8 +11,10 @@ import signal
 import sys
 import time
 from datetime import datetime
-from types import FrameType
-from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, NamedTuple
+
+if TYPE_CHECKING:
+    from types import FrameType
 
 APPNAME = "rsync-time-machine.py"
 VERBOSE = False
@@ -24,7 +29,12 @@ class SSH(NamedTuple):
     src_folder: str
     dest_folder: str
     port: str
-    id_rsa: Optional[str]
+    id_rsa: str | None
+
+
+def dest_is_ssh(ssh: SSH | None) -> SSH | None:
+    """Returns the SSH object only if the destination is remote."""
+    return ssh if ssh and ssh.dest_folder_prefix else None
 
 
 COLORS = {
@@ -36,7 +46,7 @@ COLORS = {
 }
 
 
-def style(text: str, color: Optional[str] = None, *, bold: bool = False) -> str:
+def style(text: str, color: str | None = None, *, bold: bool = False) -> str:
     """Return styled text."""
     color_code = COLORS.get(color, "")  # type: ignore[arg-type]
     bold_code = "\033[1m" if bold else ""
@@ -73,7 +83,7 @@ def log_error(message: str) -> None:
     log(style(message, "red", bold=True), "error")
 
 
-def log_info_cmd(message: str, ssh: Optional[SSH] = None) -> None:
+def log_info_cmd(message: str, ssh: SSH | None = None) -> None:
     """Log an info message to stdout, including the SSH command if applicable."""
     if ssh is not None:
         message = f"{ssh.cmd} '{message}'"
@@ -82,7 +92,7 @@ def log_info_cmd(message: str, ssh: Optional[SSH] = None) -> None:
 
 def terminate_script(
     _signal_number: int,
-    _frame: Optional[FrameType],
+    _frame: FrameType | None,
 ) -> None:
     """Terminate the script when CTRL+C is pressed."""
     log_info("SIGINT caught.")
@@ -136,6 +146,11 @@ def parse_arguments() -> argparse.Namespace:  # pragma: no cover
         " This is useful if you want to use configurations from the `.ssh/config` file or rely on the current username."
         " Note: this option will not enforce SSH usage, it only broadens the accepted input formats.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Simulate the backup process without making any persistent changes.",
+    )
 
     parser.add_argument(
         "src_folder",
@@ -185,7 +200,7 @@ def parse_ssh_pattern(
     folder: str,
     *,
     allow_host_only: bool = False,
-) -> Optional[Dict[str, str]]:
+) -> dict[str, str] | None:
     """Parse the source or destination folder for SSH usage."""
     pattern = r"^(?:(?P<user>[a-z0-9\._\-]+)@)?(?P<host>[A-Za-z0-9.\-]+):(?P<path>.+)$"
     match = re.match(pattern, folder)
@@ -203,9 +218,9 @@ def parse_ssh(
     dest_folder: str,
     *,
     ssh_port: str,
-    id_rsa: Optional[str],
+    id_rsa: str | None,
     allow_host_only: bool,
-) -> Optional[SSH]:
+) -> SSH | None:
     """Parse the source and destination folders for SSH usage."""
     ssh_src = parse_ssh_pattern(src_folder, allow_host_only=allow_host_only)
     ssh_dest = parse_ssh_pattern(dest_folder, allow_host_only=allow_host_only)
@@ -216,7 +231,8 @@ def parse_ssh(
         ssh_user = ssh["user"] if ssh["user"] else ""
         ssh_host = ssh["host"]
         auth = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
-        ssh_cmd = f"ssh -p {ssh_port} {'-i ' + id_rsa if id_rsa else ''}{auth}"
+        id_rsa_opt = f"-i {id_rsa} " if id_rsa else ""
+        ssh_cmd = f"ssh -p {ssh_port} {id_rsa_opt}{auth}"
 
         ssh_src_folder_prefix = f"{auth}:" if ssh_src else ""
         ssh_dest_folder_prefix = f"{auth}:" if ssh_dest else ""
@@ -246,18 +262,18 @@ def parse_date_to_epoch(date_str: str) -> int:
     return int(time.mktime(dt.timetuple()))
 
 
-def find_backups(dest_folder: str, ssh: Optional[SSH] = None) -> List[str]:
+def find_backups(dest_folder: str, ssh: SSH | None = None) -> list[str]:
     """Return a list of all available backups in the destination folder, sorted by date.
 
     (Replaces 'fn_find_backups' in the Bash script).
     """
     cmd = f"find '{dest_folder}/' -maxdepth 1 -type d -name '????-??-??-??????' -prune | sort -r"
-    return run_cmd(cmd, ssh).stdout.splitlines()
+    return run_cmd(cmd, dest_is_ssh(ssh)).stdout.splitlines()
 
 
 def expire_backup(
     backup_path: str,
-    ssh: Optional[SSH],
+    ssh: SSH | None,
 ) -> None:
     """Expire the given backup folder after checking if it's on a backup destination."""
     parent_dir = os.path.dirname(backup_path)
@@ -276,7 +292,7 @@ def expire_backups(
     dest_folder: str,
     expiration_strategy: str,
     backup_to_keep: str,
-    ssh: Optional[SSH],
+    ssh: SSH | None,
 ) -> None:
     """Expire backups according to the expiration strategy."""
     current_timestamp = int(datetime.now().timestamp())
@@ -351,10 +367,10 @@ def backup_marker_path(folder: str) -> str:
     return os.path.join(folder, "backup.marker")
 
 
-def find_backup_marker(folder: str, ssh: Optional[SSH] = None) -> Optional[str]:
+def find_backup_marker(folder: str, ssh: SSH | None = None) -> str | None:
     """Find the backup marker file in the given folder."""
     marker_path = backup_marker_path(folder)
-    output = find(marker_path, ssh)
+    output = find(marker_path, dest_is_ssh(ssh))
     return marker_path if output else None
 
 
@@ -368,7 +384,7 @@ class CmdResult(NamedTuple):
 
 async def async_run_cmd(
     cmd: str,
-    ssh: Optional[SSH] = None,
+    ssh: SSH | None = None,
 ) -> CmdResult:
     """Run a command locally or remotely."""
     if VERBOSE:
@@ -428,13 +444,13 @@ async def read_stream(
 
 def run_cmd(
     cmd: str,
-    ssh: Optional[SSH] = None,
+    ssh: SSH | None = None,
 ) -> CmdResult:
     """Synchronously run a command locally or remotely."""
     return asyncio.run(async_run_cmd(cmd, ssh))
 
 
-def find(path: str, ssh: Optional[SSH] = None, maxdepth: Optional[int] = None) -> str:
+def find(path: str, ssh: SSH | None = None, maxdepth: int | None = None) -> str:
     """Find files in the given path, using the `find` command."""
     cmd = f"find '{path}'"
     if maxdepth is not None:
@@ -442,37 +458,37 @@ def find(path: str, ssh: Optional[SSH] = None, maxdepth: Optional[int] = None) -
     return run_cmd(cmd, ssh).stdout
 
 
-def get_absolute_path(path: str, ssh: Optional[SSH] = None) -> str:
+def get_absolute_path(path: str, ssh: SSH | None = None) -> str:
     """Get the absolute path of the given path."""
-    return run_cmd(f"cd '{path}';pwd", ssh).stdout
+    return run_cmd(f"cd '{path}' && pwd", ssh).stdout
 
 
-def mkdir(path: str, ssh: Optional[SSH] = None) -> None:
+def mkdir(path: str, ssh: SSH | None = None) -> None:
     """Create a directory."""
     run_cmd(f"mkdir -p -- '{path}'", ssh)
 
 
-def rm_file(path: str, ssh: Optional[SSH] = None) -> None:
+def rm_file(path: str, ssh: SSH | None = None) -> None:
     """Remove a file."""
     run_cmd(f"rm -f -- '{path}'", ssh)
 
 
-def rm_dir(path: str, ssh: Optional[SSH] = None) -> None:
+def rm_dir(path: str, ssh: SSH | None = None) -> None:
     """Remove a directory."""
     run_cmd(f"rm -rf -- '{path}'", ssh)
 
 
-def ln(src: str, dest: str, ssh: Optional[SSH] = None) -> None:
+def ln(src: str, dest: str, ssh: SSH | None = None) -> None:
     """Create a symlink."""
     run_cmd(f"ln -s -- '{src}' '{dest}'", ssh)
 
 
-def test_file_exists_src(path: str) -> bool:
+def test_file_exists_src(path: str, ssh: SSH | None = None) -> bool:  # noqa: PT028
     """Test if a file exists."""
-    return run_cmd(f"test -e '{path}'", None).returncode == 0
+    return run_cmd(f"test -e '{path}'", ssh).returncode == 0
 
 
-def get_file_system_type(path: str, ssh: Optional[SSH] = None) -> str:
+def get_file_system_type(path: str, ssh: SSH | None = None) -> str:
     """Get the filesystem type of the given path."""
     lines = run_cmd(f"df -T '{path}'", ssh).stdout.split("\n")
     if len(lines) > 1:
@@ -482,7 +498,7 @@ def get_file_system_type(path: str, ssh: Optional[SSH] = None) -> str:
 
 def check_dest_is_backup_folder(
     dest_folder: str,
-    ssh: Optional[SSH],
+    ssh: SSH | None,
 ) -> None:
     """Check if the destination is a backup folder or drive."""
     marker_path = backup_marker_path(dest_folder)
@@ -511,8 +527,8 @@ def check_dest_is_backup_folder(
 
 
 def get_link_dest_option(
-    previous_dest: Optional[str],
-    ssh: Optional[SSH],
+    previous_dest: str | None,
+    ssh: SSH | None,
 ) -> str:
     """Get the --link-dest option for rsync."""
     link_dest_option = ""
@@ -538,10 +554,10 @@ def handle_ssh(
     dest_folder: str,
     *,
     ssh_port: str,
-    id_rsa: Optional[str],
+    id_rsa: str | None,
     exclusion_file: str,
     allow_host_only: bool,
-) -> Tuple[str, str, Optional[SSH]]:
+) -> tuple[str, str, SSH | None]:
     """Handle SSH-related things for in the `main` function."""
     ssh = parse_ssh(
         src_folder,
@@ -556,8 +572,8 @@ def handle_ssh(
         if ssh.src_folder:
             src_folder = ssh.src_folder
 
-    dest_folder = dest_folder.rstrip("/")
-    src_folder = src_folder.rstrip("/")
+    dest_folder = dest_folder.rstrip("/") if dest_folder != "/" else dest_folder
+    src_folder = src_folder.rstrip("/") if src_folder != "/" else src_folder
 
     if not src_folder or not dest_folder:
         log_error("Source and destination folder cannot be empty.")
@@ -584,8 +600,8 @@ def get_rsync_flags(
     dest_folder: str,
     rsync_set_flags: str,
     rsync_append_flags: str,
-    ssh: Optional[SSH],
-) -> List[str]:
+    ssh: SSH | None,
+) -> list[str]:
     """Get the rsync flags."""
     rsync_flags = [
         "-D",
@@ -610,8 +626,8 @@ def get_rsync_flags(
         rsync_flags += rsync_append_flags.split()
 
     if (
-        get_file_system_type(src_folder).lower() == "fat"
-        or get_file_system_type(dest_folder, ssh).lower() == "fat"
+        get_file_system_type(src_folder, ssh).lower() == "fat"
+        or get_file_system_type(dest_folder, dest_is_ssh(ssh)).lower() == "fat"
     ):
         log_info("File-system is a version of FAT.")
         log_info("Using the --modify-window rsync parameter with value 2.")
@@ -622,7 +638,7 @@ def get_rsync_flags(
     return rsync_flags
 
 
-def exit_if_pid_running(running_pid: str, ssh: Optional[SSH] = None) -> None:
+def exit_if_pid_running(running_pid: str, ssh: SSH | None = None) -> None:
     """Exit if another instance of this script is already running."""
     if sys.platform == "cygwin":
         cmd = f"procps -wwfo cmd -p {running_pid} --no-headers | grep '{APPNAME}'"
@@ -645,8 +661,8 @@ def handle_still_running_or_failed_or_interrupted_backup(
     mypid: int,
     dest: str,
     dest_folder: str,
-    previous_dest: Optional[str],
-    ssh: Optional[SSH],
+    previous_dest: str | None,
+    ssh: SSH | None,
 ) -> None:
     """Handle cases when backup is still running or failed or interrupted backup."""
     if not find(inprogress_file, ssh):
@@ -674,11 +690,11 @@ def deal_with_no_space_left(
     log_file: str,
     dest_folder: str,
     *,
-    ssh: Optional[SSH],
+    ssh: SSH | None,
     auto_expire: bool,
 ) -> bool:
     """Deal with no space left on device."""
-    with open(log_file) as f:
+    with open(log_file, encoding="utf-8", errors="surrogateescape") as f:
         log_data = f.read()
 
     no_space_left = re.search(
@@ -711,7 +727,7 @@ def check_rsync_errors(
     auto_delete_log: bool,  # noqa: FBT001
 ) -> None:
     """Check rsync errors."""
-    with open(log_file) as f:
+    with open(log_file, encoding="utf-8", errors="surrogateescape") as f:
         log_data = f.read()
     if "rsync error:" in log_data:
         log_error(
@@ -738,10 +754,10 @@ def start_backup(
     exclusion_file: str,
     inprogress_file: str,
     link_dest_option: str,
-    rsync_flags: List[str],
+    rsync_flags: list[str],
     log_dir: str,
     mypid: int,
-    ssh: Optional[SSH],
+    ssh: SSH | None,
     now: str,
 ) -> str:
     """Start backup."""
@@ -793,6 +809,7 @@ def backup(
     rsync_append_flags: str,
     rsync_get_flags: bool,
     allow_host_only: bool,
+    dry_run: bool,
 ) -> None:
     """Perform backup of src_folder to dest_folder."""
     (
@@ -808,11 +825,11 @@ def backup(
         allow_host_only=allow_host_only,
     )
 
-    if not test_file_exists_src(src_folder):
+    if not test_file_exists_src(src_folder, ssh):
         log_error(f"Source folder '{src_folder}' does not exist - aborting.")
         sys.exit(1)
 
-    check_dest_is_backup_folder(dest_folder, ssh)
+    check_dest_is_backup_folder(dest_folder, dest_is_ssh(ssh))
 
     now = now_str()
     dest = os.path.join(dest_folder, now)
@@ -842,16 +859,25 @@ def backup(
         ssh,
     )
 
+    if "-n" in rsync_flags or "--dry-run" in rsync_flags:
+        dry_run = True
+        log_info(
+            f"Dry-run detected in rsync flags - setting {style('--dry-run', 'green')}.",
+        )
+    elif dry_run:
+        rsync_flags.append("--dry-run")
+    if dry_run:
+        log_info(
+            f"Dry-run mode enabled: {style('no changes will be persisted', 'orange')}.",
+        )
+
     if rsync_get_flags:
         flags = " ".join(rsync_flags)
         log_info(f"Rsync flags:\n{style(flags, 'yellow', bold=True)}")
         sys.exit(0)
 
     for _ in range(100):  # max 100 retries when no space left
-        link_dest_option = get_link_dest_option(
-            previous_dest,
-            ssh,
-        )
+        link_dest_option = get_link_dest_option(previous_dest, ssh)
 
         if not find(dest, ssh, maxdepth=0):
             _full_dest = style(f"{ssh.cmd if ssh else ''}{dest}", bold=True)
@@ -861,7 +887,7 @@ def backup(
         expire_backups(
             dest_folder,
             expiration_strategy,
-            previous_dest if previous_dest else dest,
+            previous_dest or dest,
             ssh,
         )
 
@@ -888,11 +914,19 @@ def backup(
 
     check_rsync_errors(log_file, auto_delete_log)
 
-    rm_file(os.path.join(dest_folder, "latest"), ssh)
+    if dry_run:
+        # In dry-run mode, clean up any temporary artifacts
+        # and exit without updating the "latest" symlink.
+        rm_dir(dest, ssh)
+        rm_file(inprogress_file, ssh)
+        log_info("Dry run complete - no backup was saved.")
+        return
+
+    rm_file(os.path.join(dest_folder, "latest"), dest_is_ssh(ssh))
     ln(
         os.path.basename(dest),
         os.path.join(dest_folder, "latest"),
-        ssh,
+        dest_is_ssh(ssh),
     )
 
     rm_file(inprogress_file, ssh)
@@ -918,6 +952,7 @@ def main() -> None:
         rsync_append_flags=args.rsync_append_flags,
         rsync_get_flags=args.rsync_get_flags,
         allow_host_only=args.allow_host_only,
+        dry_run=args.dry_run,
     )
 
 

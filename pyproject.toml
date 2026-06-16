@@ -19,7 +19,13 @@ Homepage = "https://github.com/basnijholt/rsync-time-machine.py"
 
 [project.optional-dependencies]
 test = ["pytest", "pre-commit", "coverage", "pytest-cov"]
-docs = []
+
+[dependency-groups]
+docs = [
+    "zensical; python_version >= '3.9'",
+    "markdown-gfm-admonition; python_version >= '3.9'",
+    "markdown-code-runner>=2.7.0; python_version >= '3.9'",
+]
 
 [project.scripts]
 rsync-time-machine = "rsync_time_machine:main"
@@ -49,6 +55,8 @@ line_length = 88
 [tool.ruff]
 line-length = 150
 target-version = "py37"
+
+[tool.ruff.lint]
 select = ["ALL"]
 ignore = [
     "T20",     # flake8-print
@@ -66,11 +74,12 @@ ignore = [
     "S602",    # `subprocess` call with `shell=True` identified, security issue
 ]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "tests/*" = ["SLF001"]
 ".github/*" = ["INP001"]
+"docs/*" = ["INP001", "S603", "S607"]
 
-[tool.ruff.mccabe]
+[tool.ruff.lint.mccabe]
 max-complexity = 18
 
 [tool.mypy]
